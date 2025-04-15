@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"math"
 	"net"
@@ -14,13 +15,22 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gdamore/tcell/v2"
+	"gopkg.in/yaml.v3"
 	"golang.org/x/net/icmp"
 	"golang.org/x/net/ipv4"
 )
 
+type Config struct {
+	Hosts    []string      `yaml:"hosts"`
+	Interval time.Duration `yaml:"interval"`
+	Timeout  time.Duration `yaml:"timeout"`
+	UseICMP  bool          `yaml:"use_icmp"`
+}
+
 type HostStats struct {
-	Host      string
-	Latency   time.Duration
+	Host       string
+	Latency    time.Duration
 	PacketLoss float64
 	Timestamps []time.Time
 	RTTs       []time.Duration
@@ -28,10 +38,22 @@ type HostStats struct {
 }
 
 var (
-	hosts      = []string{"1.1.1.1", "8.8.8.8", "google.com"}
-	interval   = 1 * time.Second
-	run        = true
+	run      = true
+	cfg      Config
 )
+
+func loadConfig(path string) Config {
+	data, err := ioutil.ReadFile(path)
+	if err != nil {
+		log.Fatalf("Failed to read config: %v", err)
+	}
+	var c Config
+	err = yaml.Unmarshal(data, &c)
+	if err != nil {
+		log.Fatalf("Failed to parse config: %v", err)
+	}
+	return c
+}
 
 func resolveHost(host string) (string, error) {
 	ips, err := net.LookupIP(host)
@@ -41,16 +63,17 @@ func resolveHost(host string) (string, error) {
 	return ips[0].String(), nil
 }
 
-func ping(host string, stats *HostStats) {
+func pingICMP(host string, stats *HostStats) {
 	ip, err := resolveHost(host)
 	if err != nil {
-		log.Printf("Failed to resolve %s: %v\n", host, err)
+		log.Printf("Resolve error for %s: %v\n", host, err)
 		return
 	}
 
 	conn, err := icmp.ListenPacket("ip4:icmp", "0.0.0.0")
 	if err != nil {
-		log.Fatalf("ListenPacket error: %v", err)
+		log.Printf("ICMP ListenPacket error: %v\n", err)
+		return
 	}
 	defer conn.Close()
 
@@ -69,75 +92,95 @@ func ping(host string, stats *HostStats) {
 			},
 		}
 		seq++
-		b, err := msg.Marshal(nil)
-		if err != nil {
-			log.Printf("Marshal error: %v\n", err)
-			continue
-		}
-
+		b, _ := msg.Marshal(nil)
 		start := time.Now()
+		conn.SetDeadline(time.Now().Add(cfg.Timeout))
 		_, err = conn.WriteTo(b, &net.IPAddr{IP: net.ParseIP(ip)})
 		sent++
 		if err != nil {
-			log.Printf("WriteTo error: %v\n", err)
 			continue
 		}
 
-		conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 		resp := make([]byte, 1500)
-		n, peer, err := conn.ReadFrom(resp)
-		if err != nil {
-			stats.mutex.Lock()
-			stats.PacketLoss = float64(sent-received) / float64(sent) * 100
-			stats.mutex.Unlock()
-			time.Sleep(interval)
-			continue
-		}
-		rtt := time.Since(start)
-
-		received++
-		m, err := icmp.ParseMessage(1, resp[:n])
-		if err == nil && m.Type == ipv4.ICMPTypeEchoReply {
+		n, _, err := conn.ReadFrom(resp)
+		if err == nil {
+			received++
+			rtt := time.Since(start)
 			stats.mutex.Lock()
 			stats.RTTs = append(stats.RTTs, rtt)
-			stats.Timestamps = append(stats.Timestamps, time.Now())
 			stats.Latency = rtt
+			stats.Timestamps = append(stats.Timestamps, time.Now())
 			stats.PacketLoss = float64(sent-received) / float64(sent) * 100
 			stats.mutex.Unlock()
-			log.Printf("Ping %s (%s): %v from %s\n", host, ip, rtt, peer.String())
 		}
-		time.Sleep(interval)
+		time.Sleep(cfg.Interval)
 	}
 }
 
-func displayLoop(allStats []*HostStats) {
+func pingTCP(host string, stats *HostStats) {
+	sent := 0
+	received := 0
 	for run {
-		fmt.Print("\033[H\033[2J") // clear screen
-		fmt.Println("Real-time Network Latency Visualizer")
-		fmt.Println(strings.Repeat("=", 40))
+		start := time.Now()
+		sent++
+		conn, err := net.DialTimeout("tcp", host, cfg.Timeout)
+		if err == nil {
+			received++
+			rtt := time.Since(start)
+			conn.Close()
+			stats.mutex.Lock()
+			stats.RTTs = append(stats.RTTs, rtt)
+			stats.Latency = rtt
+			stats.Timestamps = append(stats.Timestamps, time.Now())
+			stats.PacketLoss = float64(sent-received) / float64(sent) * 100
+			stats.mutex.Unlock()
+		}
+		time.Sleep(cfg.Interval)
+	}
+}
 
-		sort.Slice(allStats, func(i, j int) bool {
-			allStats[i].mutex.Lock()
-			allStats[j].mutex.Lock()
-			defer allStats[i].mutex.Unlock()
-			defer allStats[j].mutex.Unlock()
-			return allStats[i].Latency < allStats[j].Latency
+func displayLoop(stats []*HostStats) {
+	screen, err := tcell.NewScreen()
+	if err != nil {
+		log.Fatalf("Failed to create screen: %v", err)
+	}
+	screen.Init()
+	defer screen.Fini()
+
+	for run {
+		screen.Clear()
+		drawText(screen, 0, 0, tcell.StyleDefault.Bold(true), "Host", "Latency", "PacketLoss")
+
+		sort.Slice(stats, func(i, j int) bool {
+			stats[i].mutex.Lock()
+			stats[j].mutex.Lock()
+			defer stats[i].mutex.Unlock()
+			defer stats[j].mutex.Unlock()
+			return stats[i].Latency < stats[j].Latency
 		})
 
-		for _, s := range allStats {
+		for i, s := range stats {
 			s.mutex.Lock()
-			fmt.Printf("%s | Latency: %v | Loss: %.1f%%\n", s.Host, s.Latency, s.PacketLoss)
+			line := fmt.Sprintf("%s %v %.1f%%", s.Host, s.Latency, s.PacketLoss)
+			drawText(screen, 0, i+2, tcell.StyleDefault, line)
 			s.mutex.Unlock()
 		}
+		screen.Show()
+		time.Sleep(1 * time.Second)
+	}
+}
 
-		time.Sleep(2 * time.Second)
+func drawText(s tcell.Screen, x, y int, style tcell.Style, txt ...string) {
+	line := strings.Join(txt, "    ")
+	for i, c := range line {
+		s.SetContent(x+i, y, c, nil, style)
 	}
 }
 
 func saveLog(stats []*HostStats) {
 	f, err := os.Create("latency_log.json")
 	if err != nil {
-		log.Printf("Error saving log: %v\n", err)
+		log.Printf("Log save error: %v\n", err)
 		return
 	}
 	defer f.Close()
@@ -148,33 +191,36 @@ func saveLog(stats []*HostStats) {
 		data[s.Host] = s.RTTs
 		s.mutex.Unlock()
 	}
-
 	enc := json.NewEncoder(f)
 	enc.SetIndent("", "  ")
 	enc.Encode(data)
 }
 
 func main() {
+	cfg = loadConfig("config.yaml")
+
 	var wg sync.WaitGroup
 	allStats := []*HostStats{}
 
-	for _, host := range hosts {
+	for _, host := range cfg.Hosts {
 		stat := &HostStats{Host: host}
 		allStats = append(allStats, stat)
 		wg.Add(1)
 		go func(h string, s *HostStats) {
 			defer wg.Done()
-			ping(h, s)
+			if cfg.UseICMP {
+				pingICMP(h, s)
+			} else {
+				pingTCP(h, s)
+			}
 		}(host, stat)
 	}
 
 	go displayLoop(allStats)
 
-	// Handle CTRL+C
 	ch := make(chan os.Signal, 1)
 	signal.Notify(ch, syscall.SIGINT, syscall.SIGTERM)
 	<-ch
-	fmt.Println("\nExiting...")
 	run = false
 
 	wg.Wait()
