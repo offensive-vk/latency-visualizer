@@ -15,7 +15,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/gdamore/tcell/v2"
+	"github.com/gizak/termui/v3"
+	"github.com/gizak/termui/v3/widgets"
 	"gopkg.in/yaml.v3"
 	"golang.org/x/net/icmp"
 	"golang.org/x/net/ipv4"
@@ -38,8 +39,8 @@ type HostStats struct {
 }
 
 var (
-	run      = true
-	cfg      Config
+	run = true
+	cfg Config
 )
 
 func loadConfig(path string) Config {
@@ -177,6 +178,56 @@ func drawText(s tcell.Screen, x, y int, style tcell.Style, txt ...string) {
 	}
 }
 
+func displayGraph(stats []*HostStats) {
+	if err := termui.Init(); err != nil {
+		log.Fatalf("failed to initialize termui: %v", err)
+	}
+	defer termui.Close()
+
+	plot := widgets.NewPlot()
+	plot.Title = "Latency (ms)"
+	plot.SetRect(0, 0, 100, 20)
+	plot.Data = make([][]float64, len(stats))
+	plot.AxesColor = termui.ColorWhite
+	plot.LineColors[0] = termui.ColorGreen
+	plot.Marker = widgets.MarkerBraille
+
+	legend := widgets.NewParagraph()
+	legend.Title = "Hosts"
+	legend.SetRect(0, 20, 100, 25)
+	legend.TextStyle.Fg = termui.ColorCyan
+
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+
+	uiEvents := termui.PollEvents()
+	for run {
+		select {
+		case <-ticker.C:
+			legendText := ""
+			for i, s := range stats {
+				s.mutex.Lock()
+				if len(s.RTTs) > 50 {
+					s.RTTs = s.RTTs[len(s.RTTs)-50:]
+				}
+				slice := make([]float64, len(s.RTTs))
+				for j, d := range s.RTTs {
+					slice[j] = float64(d.Milliseconds())
+				}
+				plot.Data[i] = slice
+				legendText += fmt.Sprintf("%d. %s\n", i+1, s.Host)
+				s.mutex.Unlock()
+			}
+			legend.Text = legendText
+			termui.Render(plot, legend)
+		case e := <-uiEvents:
+			if e.Type == termui.KeyboardEvent && e.ID == "q" {
+				run = false
+			}
+		}
+	}
+}
+
 func saveLog(stats []*HostStats) {
 	f, err := os.Create("latency_log.json")
 	if err != nil {
@@ -216,7 +267,7 @@ func main() {
 		}(host, stat)
 	}
 
-	go displayLoop(allStats)
+	go displayGraph(allStats)
 
 	ch := make(chan os.Signal, 1)
 	signal.Notify(ch, syscall.SIGINT, syscall.SIGTERM)
@@ -226,3 +277,4 @@ func main() {
 	wg.Wait()
 	saveLog(allStats)
 }
+
