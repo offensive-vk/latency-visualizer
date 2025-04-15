@@ -1,0 +1,7 @@
+hosts:
+  - "8.8.8.8:53"
+  - "1.1.1.1:53"
+  - "google.com:80"
+interval: 1s
+timeout: 2s
+use_icmp: false
