@@ -3,9 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"log"
-	"math"
 	"net"
 	"os"
 	"os/signal"
@@ -15,11 +13,12 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gdamore/tcell/v2"
 	"github.com/gizak/termui/v3"
 	"github.com/gizak/termui/v3/widgets"
-	"gopkg.in/yaml.v3"
 	"golang.org/x/net/icmp"
 	"golang.org/x/net/ipv4"
+	"gopkg.in/yaml.v3"
 )
 
 type Config struct {
@@ -44,7 +43,7 @@ var (
 )
 
 func loadConfig(path string) Config {
-	data, err := ioutil.ReadFile(path)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		log.Fatalf("Failed to read config: %v", err)
 	}
@@ -104,6 +103,9 @@ func pingICMP(host string, stats *HostStats) {
 
 		resp := make([]byte, 1500)
 		n, _, err := conn.ReadFrom(resp)
+		if n == 0 {
+			fmt.Println(n)
+		}
 		if err == nil {
 			received++
 			rtt := time.Since(start)
@@ -277,4 +279,3 @@ func main() {
 	wg.Wait()
 	saveLog(allStats)
 }
-
