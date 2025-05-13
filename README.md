@@ -16,15 +16,11 @@ A full-fledged terminal-based tool to monitor real-time network latency and pack
 * 📉 Live sorted display by latency
 * 🖥️ Minimal dependencies, portable, fast
 
----
-
 ## 🛠️ Installation
 
 ```bash
 go build -o latency-visualizer
 ```
-
----
 
 ## 🧾 Configuration
 
@@ -40,8 +36,6 @@ timeout: 2s          # Timeout for each ping
 use_icmp: false      # Set true to use ICMP, false for TCP
 ```
 
----
-
 ## 📈 Usage
 
 ```bash
@@ -50,8 +44,6 @@ use_icmp: false      # Set true to use ICMP, false for TCP
 
 * Press `q` to quit.
 * Logs saved to `latency_log.json` on exit.
-
----
 
 ## 📦 Dependencies
 
@@ -65,7 +57,25 @@ Install dependencies:
 go get github.com/gizak/termui/v3 gopkg.in/yaml.v3 golang.org/x/net/icmp
 ```
 
----
+## 🧪Docker: Build and Run
+
+1. **Build the image:**
+
+   ```bash
+   docker build -t latency-visualizer .
+   ```
+
+2. **Run the container (interactive mode for TUI):**
+
+   ```bash
+   docker run --rm -it --cap-add=NET_RAW --network=host latency-visualizer
+   ```
+
+> 📌 **Note**:
+>
+> * Use `--cap-add=NET_RAW` for ICMP (required for ping).
+> * `--network=host` enables accurate latency to external targets.
+> * If using TCP fallback only, you may omit `NET_RAW`.
 
 ## 📊 Roadmap
 
@@ -73,8 +83,6 @@ go get github.com/gizak/termui/v3 gopkg.in/yaml.v3 golang.org/x/net/icmp
 * [ ] Web dashboard (with Chart.js)
 * [ ] CSV export
 * [ ] Prometheus metrics endpoint
-
----
 
 ## 📄 License
 

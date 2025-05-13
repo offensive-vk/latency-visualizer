@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"flag"
 	"fmt"
 	"log"
 	"net"
@@ -38,9 +39,35 @@ type HostStats struct {
 }
 
 var (
-	run = true
-	cfg Config
+	run      = true
+	cfg      Config
+	showHelp = flag.Bool("help", false, "Show usage instructions")
+	config   = flag.String("config", "config.yaml", "Path to YAML config file")
 )
+
+func printHelp() {
+	fmt.Println(`Usage: go run main.go [OPTIONS]
+
+A real-time network latency visualizer with terminal UI.
+
+Options:
+  -config string   Path to YAML config file (default "config.yaml")
+  -help            Show this help manual
+
+YAML Config Example:
+  hosts:
+    - google.com
+    - github.com:443
+  interval: 1s
+  timeout: 1s
+  use_icmp: true
+
+Controls:
+  q        Quit the graph interface
+
+On exit, latency data is saved to "latency_log.json".
+`)
+}
 
 func loadConfig(path string) Config {
 	data, err := os.ReadFile(path)
@@ -98,14 +125,12 @@ func pingICMP(host string, stats *HostStats) {
 		_, err = conn.WriteTo(b, &net.IPAddr{IP: net.ParseIP(ip)})
 		sent++
 		if err != nil {
+			time.Sleep(cfg.Interval)
 			continue
 		}
 
 		resp := make([]byte, 1500)
-		n, _, err := conn.ReadFrom(resp)
-		if n == 0 {
-			fmt.Println(n)
-		}
+		_, _, err = conn.ReadFrom(resp)
 		if err == nil {
 			received++
 			rtt := time.Since(start)
@@ -142,47 +167,11 @@ func pingTCP(host string, stats *HostStats) {
 	}
 }
 
-func displayLoop(stats []*HostStats) {
-	screen, err := tcell.NewScreen()
-	if err != nil {
-		log.Fatalf("Failed to create screen: %v", err)
-	}
-	screen.Init()
-	defer screen.Fini()
-
-	for run {
-		screen.Clear()
-		drawText(screen, 0, 0, tcell.StyleDefault.Bold(true), "Host", "Latency", "PacketLoss")
-
-		sort.Slice(stats, func(i, j int) bool {
-			stats[i].mutex.Lock()
-			stats[j].mutex.Lock()
-			defer stats[i].mutex.Unlock()
-			defer stats[j].mutex.Unlock()
-			return stats[i].Latency < stats[j].Latency
-		})
-
-		for i, s := range stats {
-			s.mutex.Lock()
-			line := fmt.Sprintf("%s %v %.1f%%", s.Host, s.Latency, s.PacketLoss)
-			drawText(screen, 0, i+2, tcell.StyleDefault, line)
-			s.mutex.Unlock()
-		}
-		screen.Show()
-		time.Sleep(1 * time.Second)
-	}
-}
-
-func drawText(s tcell.Screen, x, y int, style tcell.Style, txt ...string) {
-	line := strings.Join(txt, "    ")
-	for i, c := range line {
-		s.SetContent(x+i, y, c, nil, style)
-	}
-}
-
 func displayGraph(stats []*HostStats) {
 	if err := termui.Init(); err != nil {
-		log.Fatalf("failed to initialize termui: %v", err)
+		log.Printf("Graph display error, falling back to CLI: %v", err)
+		displayLoop(stats)
+		return
 	}
 	defer termui.Close()
 
@@ -230,6 +219,45 @@ func displayGraph(stats []*HostStats) {
 	}
 }
 
+func displayLoop(stats []*HostStats) {
+	screen, err := tcell.NewScreen()
+	if err != nil {
+		log.Printf("Fallback display failed: %v", err)
+		return
+	}
+	screen.Init()
+	defer screen.Fini()
+
+	for run {
+		screen.Clear()
+		drawText(screen, 0, 0, tcell.StyleDefault.Bold(true), "Host", "Latency", "PacketLoss")
+
+		sort.Slice(stats, func(i, j int) bool {
+			stats[i].mutex.Lock()
+			stats[j].mutex.Lock()
+			defer stats[i].mutex.Unlock()
+			defer stats[j].mutex.Unlock()
+			return stats[i].Latency < stats[j].Latency
+		})
+
+		for i, s := range stats {
+			s.mutex.Lock()
+			line := fmt.Sprintf("%s %v %.1f%%", s.Host, s.Latency, s.PacketLoss)
+			drawText(screen, 0, i+2, tcell.StyleDefault, line)
+			s.mutex.Unlock()
+		}
+		screen.Show()
+		time.Sleep(1 * time.Second)
+	}
+}
+
+func drawText(s tcell.Screen, x, y int, style tcell.Style, txt ...string) {
+	line := strings.Join(txt, "    ")
+	for i, c := range line {
+		s.SetContent(x+i, y, c, nil, style)
+	}
+}
+
 func saveLog(stats []*HostStats) {
 	f, err := os.Create("latency_log.json")
 	if err != nil {
@@ -250,7 +278,13 @@ func saveLog(stats []*HostStats) {
 }
 
 func main() {
-	cfg = loadConfig("config.yaml")
+	flag.Parse()
+	if *showHelp {
+		printHelp()
+		return
+	}
+
+	cfg = loadConfig(*config)
 
 	var wg sync.WaitGroup
 	allStats := []*HostStats{}
